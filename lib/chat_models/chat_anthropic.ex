@@ -480,6 +480,10 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     # Set to %{enabled: false} or nil to disable automatic message caching.
     field :cache_messages, :map
 
+    # Output configuration for controlling model behavior.
+    # e.g., %{"effort" => "medium"} for adaptive thinking effort control.
+    field :output_config, :map
+
     # Req options to merge into the request.
     # https://hexdocs.pm/req/Req.html#new/1-options
     field :req_opts, :any, virtual: true, default: []
@@ -503,6 +507,7 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     :beta_headers,
     :verbose_api,
     :cache_messages,
+    :output_config,
     :req_opts
   ]
   @required_fields [:endpoint, :model]
@@ -586,6 +591,7 @@ defmodule LangChain.ChatModels.ChatAnthropic do
     |> Utils.conditionally_add_to_map(:top_p, anthropic.top_p)
     |> Utils.conditionally_add_to_map(:top_k, anthropic.top_k)
     |> Utils.conditionally_add_to_map(:thinking, anthropic.thinking)
+    |> Utils.conditionally_add_to_map(:output_config, anthropic.output_config)
     |> maybe_transform_for_bedrock(anthropic.bedrock)
   end
 
