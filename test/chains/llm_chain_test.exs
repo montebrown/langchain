@@ -699,6 +699,24 @@ defmodule LangChain.Chains.LLMChainTest do
       assert updated_chain.messages == [last]
       assert %TokenUsage{input: 15, output: 4, raw: %{}} = last.metadata.usage
     end
+
+    test "handles non-overloaded LangChainError during streaming", %{chain: chain} do
+      # Give the chain a delta in progress
+      chain_with_delta =
+        chain
+        |> LLMChain.merge_delta(
+          MessageDelta.new!(%{role: :assistant, content: "partial response"})
+        )
+
+      assert chain_with_delta.delta != nil
+
+      error = LangChainError.exception(type: "overloaded_error", message: "Overloaded")
+
+      updated_chain = LLMChain.merge_delta(chain_with_delta, {:error, error})
+
+      # Delta should be cleared (cancelled)
+      assert updated_chain.delta == nil
+    end
   end
 
   describe "add_message/2" do
@@ -1180,6 +1198,54 @@ defmodule LangChain.Chains.LLMChainTest do
 
       assert reason.type == "overloaded"
       assert reason.message == "Overloaded (from test)"
+    end
+
+    test "handles overloaded_error wrapped in :ok tuple from Anthropic" do
+      expect(ChatAnthropic, :call, fn _model, _prompt, _tools ->
+        {:ok,
+         [[error: LangChainError.exception(type: "overloaded_error", message: "Overloaded")]]}
+      end)
+
+      model = ChatAnthropic.new!(%{stream: false, model: @anthropic_test_model})
+
+      assert {:error, _updated_chain, reason} =
+               LLMChain.new!(%{llm: model})
+               |> LLMChain.add_messages([Message.new_user!("Hi")])
+               |> LLMChain.run()
+
+      assert reason.type == "overloaded_error"
+      assert reason.message == "Overloaded"
+    end
+
+    test "handles unexpected :ok response format gracefully" do
+      expect(ChatOpenAI, :call, fn _model, _prompt, _tools ->
+        {:ok, "some unexpected thing"}
+      end)
+
+      model = ChatOpenAI.new!(%{stream: false, model: "gpt-4o-mini"})
+
+      assert {:error, _updated_chain, reason} =
+               LLMChain.new!(%{llm: model})
+               |> LLMChain.add_messages([Message.new_user!("Hi")])
+               |> LLMChain.run()
+
+      assert reason.type == "unexpected_response"
+      assert reason.message == "Unexpected response format from LLM"
+    end
+
+    test "handles non-standard error shapes gracefully" do
+      expect(ChatOpenAI, :call, fn _model, _prompt, _tools ->
+        {:error, %{status: 500, body: "Internal Server Error"}}
+      end)
+
+      model = ChatOpenAI.new!(%{stream: false, model: "gpt-4o-mini"})
+
+      assert {:error, _updated_chain, reason} =
+               LLMChain.new!(%{llm: model})
+               |> LLMChain.add_messages([Message.new_user!("Hi")])
+               |> LLMChain.run()
+
+      assert reason.type == "unknown_error"
     end
 
     test "errors when messages have PromptTemplates" do
