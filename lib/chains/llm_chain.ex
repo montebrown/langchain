@@ -1086,7 +1086,6 @@ defmodule LangChain.Chains.LLMChain do
 
   defp augment_and_notify_tool_calls(_chain, struct, _opts), do: struct
 
-
   @doc """
   Drop the current delta. This is useful when needing to ignore a partial or
   complete delta because the message may be handled in a different way.
