@@ -1464,7 +1464,7 @@ defmodule LangChain.Chains.LLMChainTest do
                |> LLMChain.run()
 
       assert reason.type == "unexpected_response"
-      assert reason.message == "Unexpected response format from LLM"
+      assert reason.message == "Unexpected response format from LLM: \"some unexpected thing\""
     end
 
     test "handles non-standard error shapes gracefully" do
