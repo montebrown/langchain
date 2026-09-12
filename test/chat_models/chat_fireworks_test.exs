@@ -48,6 +48,104 @@ defmodule LangChain.ChatModels.ChatFireworksTest do
     |> MessageDelta.to_message()
   end
 
+  # A streamed request hands Req an `:into` collector, so the mocked post drives
+  # that collector the way a real response would.
+  defp expect_streamed_post(chunks, status \\ 200) do
+    expect(Req, :post, fn req, opts ->
+      collector = Keyword.fetch!(opts, :into)
+      start = {req, %Req.Response{status: status, headers: %{}, body: ""}}
+
+      {_req, response} =
+        Enum.reduce(chunks, start, fn chunk, acc ->
+          case collector.({:data, chunk}, acc) do
+            {:cont, next} -> next
+            {:halt, next} -> next
+          end
+        end)
+
+      {:ok, response}
+    end)
+  end
+
+  # Splits a recorded server-sent event stream into its events.
+  defp sse_events(recorded) do
+    recorded
+    |> String.split("\n\n", trim: true)
+    |> Enum.map(&(&1 <> "\n\n"))
+  end
+
+  defp weather_tool do
+    Function.new!(%{
+      name: "get_weather",
+      description: "Get the weather for a city",
+      parameters: [FunctionParam.new!(%{name: "city", type: :string, required: true})],
+      function: fn _args, _context -> {:ok, "Sunny"} end
+    })
+  end
+
+  # Streams recorded from GLM-5.3-Flash on Fireworks, unchanged.
+  @parallel_tool_calls_stream """
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"reasoning_content":"Two"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"reasoning_content":" independent"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"reasoning_content":" calls"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"reasoning_content":"."},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"chatcmpl-tool-b77470f25945015c","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\": \\""}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"Paris"}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"}"}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"chatcmpl-tool-b6dcb41fef4e05b2","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\\"city\\": \\""}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"Tok"}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"yo"}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\\"}"}}]},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls","raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-ee3890c280be4172ade53b0045293c45","object":"chat.completion.chunk","created":1789231777,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[],"usage":{"prompt_tokens":161,"total_tokens":188,"completion_tokens":27,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":4},"output_tokens_details":{"reasoning_tokens":4}}}
+
+  data: [DONE]
+
+  """
+
+  @text_stream """
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":"E"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":"lixir"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":" is"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":" functional"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":" and"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":" concurrent"},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{"content":"."},"finish_reason":null,"raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[{"index":0,"delta":{},"finish_reason":"stop","raw_output":null}],"usage":null}
+
+  data: {"id":"chatcmpl-8d585b7fe2d1407e8a60a4e29bee782f","object":"chat.completion.chunk","created":1789231832,"model":"accounts/fireworks/models/glm-5p3-flash","choices":[],"usage":{"prompt_tokens":21,"total_tokens":30,"completion_tokens":9,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}
+
+  data: [DONE]
+
+  """
+
   describe "new/1" do
     test "applies Fireworks defaults" do
       assert {:ok, %ChatFireworks{} = model} = ChatFireworks.new(%{model: @model})
@@ -439,6 +537,104 @@ defmodule LangChain.ChatModels.ChatFireworksTest do
                  chunk(%{"role" => "assistant", "content" => ""})
                )
     end
+
+    test "an unknown finish reason completes the delta and logs a warning" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert [%MessageDelta{status: :complete}] =
+                   ChatFireworks.do_process_response(
+                     fireworks(),
+                     chunk(%{"content" => "Done."}, "something_new")
+                   )
+        end)
+
+      assert log =~ "Unsupported finish_reason from Fireworks"
+    end
+
+    test "an error object mid-stream is typed by its status code" do
+      for {code, type} <- [
+            {503, "overloaded"},
+            {"429", "rate_limit_exceeded"},
+            {nil, "api_error"}
+          ] do
+        error =
+          %{"message" => "busy"} |> Map.put("code", code) |> Map.reject(&is_nil(elem(&1, 1)))
+
+        assert {:error, %LangChainError{type: ^type, message: "busy"}} =
+                 ChatFireworks.do_process_response(fireworks(), %{"error" => error})
+      end
+    end
+  end
+
+  describe "recorded Fireworks streams" do
+    test "thinking and two parallel tool calls assemble into one message" do
+      expect_streamed_post(sse_events(@parallel_tool_calls_stream))
+
+      assert {:ok, chain} =
+               %{llm: fireworks(%{stream: true})}
+               |> LLMChain.new!()
+               |> LLMChain.add_tools([weather_tool()])
+               |> LLMChain.add_message(Message.new_user!("Weather in Paris and Tokyo?"))
+               |> LLMChain.run()
+
+      assert %Message{
+               role: :assistant,
+               status: :complete,
+               content: [%ContentPart{type: :thinking, content: "Two independent calls."}],
+               tool_calls: [
+                 %ToolCall{
+                   index: 0,
+                   call_id: "chatcmpl-tool-b77470f25945015c",
+                   arguments: %{"city" => "Paris"}
+                 },
+                 %ToolCall{
+                   index: 1,
+                   call_id: "chatcmpl-tool-b6dcb41fef4e05b2",
+                   arguments: %{"city" => "Tokyo"}
+                 }
+               ],
+               metadata: %{usage: %TokenUsage{input: 161, output: 27}}
+             } = chain.last_message
+    end
+
+    test "answer chunks without a reasoning field assemble into the full text" do
+      expect_streamed_post(sse_events(@text_stream))
+
+      assert {:ok, chain} =
+               %{llm: fireworks(%{stream: true})}
+               |> LLMChain.new!()
+               |> LLMChain.add_message(Message.new_user!("Describe Elixir in five words."))
+               |> LLMChain.run()
+
+      assert %Message{
+               status: :complete,
+               content: [
+                 %ContentPart{type: :text, content: "Elixir is functional and concurrent."}
+               ],
+               metadata: %{usage: %TokenUsage{input: 21, output: 9}}
+             } = chain.last_message
+    end
+
+    test "an error object mid-stream ends the message with a typed streaming error" do
+      expect_streamed_post([
+        ~s(data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"Let me"},"finish_reason":null}]}\n\n),
+        ~s(data: {"error":{"code":503,"message":"Service overloaded"}}\n\n)
+      ])
+
+      # LLMChain keeps the partial message rather than failing the run, so the
+      # error type is what callers have to go on.
+      assert {:ok, chain} =
+               %{llm: fireworks(%{stream: true})}
+               |> LLMChain.new!()
+               |> LLMChain.add_message(Message.new_user!("Hi"))
+               |> LLMChain.run()
+
+      assert %Message{
+               status: :stream_error,
+               content: [%ContentPart{type: :thinking, content: "Let me"}],
+               metadata: %{streaming_error: %LangChainError{type: "overloaded"}}
+             } = chain.last_message
+    end
   end
 
   describe "error_from_response/2" do
@@ -454,8 +650,10 @@ defmodule LangChain.ChatModels.ChatFireworksTest do
             {429, "rate_limit_exceeded"},
             {500, "server_error"},
             {502, "server_error"},
+            {501, "server_error"},
             {503, "overloaded"},
-            {504, "timeout"}
+            {504, "timeout"},
+            {529, "server_error"}
           ] do
         assert %LangChainError{type: ^type} =
                  ChatFireworks.error_from_response(status, %{"error" => %{"message" => "boom"}})
@@ -550,6 +748,66 @@ defmodule LangChain.ChatModels.ChatFireworksTest do
                ChatFireworks.call(fireworks(%{stream: true}), [Message.new_user!("Hi")], [])
     end
 
+    test "a streamed 401 is an authentication error with Fireworks' message" do
+      expect_streamed_post([~s({"error":{"message":"bad key"}})], 401)
+
+      assert {:error,
+              %LangChainError{
+                type: "authentication_error",
+                message: "Fireworks returned HTTP 401: bad key"
+              }} = ChatFireworks.call(fireworks(%{stream: true}), [Message.new_user!("Hi")], [])
+    end
+
+    test "a streamed 502 with a plain-text body is a server error" do
+      expect_streamed_post(["upstream connect error"], 502)
+
+      assert {:error,
+              %LangChainError{
+                type: "server_error",
+                message: "Fireworks returned HTTP 502: upstream connect error"
+              }} = ChatFireworks.call(fireworks(%{stream: true}), [Message.new_user!("Hi")], [])
+    end
+
+    test "a 503 hands off to the fallback model in LLMChain" do
+      expect(Req, :post, fn _request ->
+        {:ok, %Req.Response{status: 503, body: %{"error" => %{"message" => "overloaded"}}}}
+      end)
+
+      expect(Req, :post, fn _request ->
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{
+             "choices" => [
+               %{
+                 "index" => 0,
+                 "finish_reason" => "stop",
+                 "message" => %{"role" => "assistant", "content" => "from fallback"}
+               }
+             ]
+           }
+         }}
+      end)
+
+      fallback = fireworks(%{model: "accounts/fireworks/models/fallback"})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        result =
+          %{llm: fireworks()}
+          |> LLMChain.new!()
+          |> LLMChain.add_message(Message.new_user!("Hi"))
+          |> LLMChain.run(with_fallbacks: [fallback])
+
+        send(self(), {:result, result})
+      end)
+
+      assert_received {:result, {:ok, chain}}
+      assert %ChatFireworks{model: "accounts/fireworks/models/fallback"} = chain.llm
+
+      assert %Message{content: [%ContentPart{type: :text, content: "from fallback"}]} =
+               chain.last_message
+    end
+
     test "retries a closed connection, then reports it" do
       expect(Req, :post, 3, fn _request -> {:error, %Req.TransportError{reason: :closed}} end)
 
@@ -579,6 +837,11 @@ defmodule LangChain.ChatModels.ChatFireworksTest do
                 send_reasoning_content: true,
                 extra_body: %{"top_k" => 20}
               }} = ChatFireworks.restore_from_map(serialized)
+    end
+
+    test "an unknown config version is an error" do
+      assert {:error, "Unsupported ChatFireworks config version"} =
+               ChatFireworks.restore_from_map(%{"version" => 99})
     end
   end
 

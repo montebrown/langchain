@@ -78,8 +78,12 @@ defmodule LangChain.ChatModels.ChatFireworks do
   - `"preserved"` keeps all of it.
   - `"disabled"` drops all of it.
 
-  The setting applies to every assistant turn in a request, so the prompt prefix
-  stays the same from one turn to the next and prompt caching keeps working.
+  The setting applies to every assistant turn in a request, so the request body
+  stays the same from one turn to the next. With `"preserved"` and `"disabled"`
+  the rendered prompt prefix is stable too. With `"interleaved"`, the server
+  drops earlier thinking once a new user message arrives, which changes the
+  rendered prefix from the first turn that had thinking, so the cached prefix
+  ends there.
 
   ## Prompt Caching
 
@@ -482,6 +486,8 @@ defmodule LangChain.ChatModels.ChatFireworks do
     ChatFireworks.new(data)
   end
 
+  def restore_from_map(_other), do: {:error, "Unsupported ChatFireworks config version"}
+
   @doc false
   @spec do_api_request(t(), [Message.t()], ChatModel.tools(), integer() | nil) ::
           list() | {:error, LangChainError.t()}
@@ -537,14 +543,7 @@ defmodule LangChain.ChatModels.ChatFireworks do
 
     model
     |> build_request(body)
-    |> Req.post(
-      into:
-        Utils.handle_stream_fn(
-          model,
-          &ChatOpenAI.decode_stream/1,
-          &do_process_response(model, &1)
-        )
-    )
+    |> Req.post(into: stream_fn(model))
     |> case do
       {:ok, %Req.Response{status: status, body: data} = response} when status in 200..299 ->
         Callbacks.fire(model.callbacks, :on_llm_response_headers, [response.headers])
@@ -578,6 +577,23 @@ defmodule LangChain.ChatModels.ChatFireworks do
     |> Req.merge(Keyword.new(model.req_config))
   end
 
+  # `Utils.handle_stream_fn/3` ends a streamed 401 with a generic error and
+  # drops the body. Buffer it like any other error status instead, so a 401 is
+  # typed the same whether or not the request streams.
+  defp stream_fn(%ChatFireworks{} = model) do
+    handle_stream =
+      Utils.handle_stream_fn(model, &ChatOpenAI.decode_stream/1, &do_process_response(model, &1))
+
+    fn
+      {:data, data}, {req, %Req.Response{status: 401} = response} ->
+        buffered = Req.Response.get_private(response, :error_buffer, "") <> data
+        {:cont, {req, Req.Response.put_private(response, :error_buffer, buffered)}}
+
+      event, acc ->
+        handle_stream.(event, acc)
+    end
+  end
+
   defp transport_error(%Req.TransportError{reason: :timeout} = error) do
     LangChainError.exception(type: "timeout", message: "Request timed out", original: error)
   end
@@ -598,9 +614,9 @@ defmodule LangChain.ChatModels.ChatFireworks do
     )
   end
 
-  # A failed streamed request is decoded by `Utils.handle_stream_fn/3`. A JSON
-  # error body goes through `do_process_response/2`, and anything else stays
-  # buffered. Either way the HTTP status decides the error type.
+  # A failed streamed request is decoded by `stream_fn/1`. A JSON error body
+  # goes through `do_process_response/2`. A 401 body, and any body that isn't
+  # JSON, stays buffered. Either way the HTTP status decides the error type.
   defp streamed_error(%Req.Response{
          status: status,
          body: {:error, %LangChainError{original: original}}
@@ -609,8 +625,18 @@ defmodule LangChain.ChatModels.ChatFireworks do
   end
 
   defp streamed_error(%Req.Response{status: status} = response) do
-    error_from_response(status, Req.Response.get_private(response, :error_buffer, response.body))
+    buffered = Req.Response.get_private(response, :error_buffer, response.body)
+    error_from_response(status, decode_error_body(buffered))
   end
+
+  defp decode_error_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decoded
+      {:error, _reason} -> body
+    end
+  end
+
+  defp decode_error_body(body), do: body
 
   @doc false
   @spec error_from_response(integer(), any()) :: LangChainError.t()
@@ -632,6 +658,7 @@ defmodule LangChain.ChatModels.ChatFireworks do
   def type_for_status(429), do: "rate_limit_exceeded"
   def type_for_status(status) when status in [500, 502], do: "server_error"
   def type_for_status(503), do: "overloaded"
+  def type_for_status(status) when status in 500..599, do: "server_error"
   def type_for_status(_status), do: "api_error"
 
   defp error_message(%{"error" => %{"message" => message}}) when is_binary(message), do: message
@@ -652,6 +679,17 @@ defmodule LangChain.ChatModels.ChatFireworks do
 
   defp detail_message(%{"msg" => msg}), do: msg
   defp detail_message(other), do: inspect(other)
+
+  defp error_type(%{"code" => code}) when is_integer(code), do: type_for_status(code)
+
+  defp error_type(%{"code" => code}) when is_binary(code) do
+    case Integer.parse(code) do
+      {status, ""} -> type_for_status(status)
+      _other -> "api_error"
+    end
+  end
+
+  defp error_type(_error), do: "api_error"
 
   @doc false
   @spec do_process_response(t(), data :: any()) ::
@@ -694,9 +732,17 @@ defmodule LangChain.ChatModels.ChatFireworks do
     end)
   end
 
-  def do_process_response(_model, %{"error" => _} = body) do
+  # An error object, either as an error response body or mid-stream. A status
+  # code in it types the error. LLMChain ends a stream that hits one with a
+  # `:stream_error` message that carries this error, so the type is what tells
+  # a rate limit or overload apart from other failures.
+  def do_process_response(_model, %{"error" => error} = body) do
     {:error,
-     LangChainError.exception(type: "api_error", message: error_message(body), original: body)}
+     LangChainError.exception(
+       type: error_type(error),
+       message: error_message(body),
+       original: body
+     )}
   end
 
   def do_process_response(_model, %{"detail" => _} = body) do
@@ -811,9 +857,14 @@ defmodule LangChain.ChatModels.ChatFireworks do
   defp finish_reason_to_status("length"), do: :length
   defp finish_reason_to_status("max_tokens"), do: :length
   defp finish_reason_to_status("content_filter"), do: :content_filtered
-  # "stop", "tool_calls", "function_call", and any other reason a choice finished
-  # with.
-  defp finish_reason_to_status(_finished), do: :complete
+
+  defp finish_reason_to_status(reason) when reason in ["stop", "tool_calls", "function_call"],
+    do: :complete
+
+  defp finish_reason_to_status(other) do
+    Logger.warning("Unsupported finish_reason from Fireworks. Reason: #{inspect(other)}")
+    :complete
+  end
 
   # Usage arrives once per response. Attach it to one delta so it is counted
   # once.
