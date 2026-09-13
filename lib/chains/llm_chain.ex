@@ -1208,6 +1208,19 @@ defmodule LangChain.Chains.LLMChain do
     %LLMChain{chain | delta: nil}
   end
 
+  # A delta about to be dropped may already carry the attempt's token usage.
+  # Anthropic reports the whole prompt's input, cache-read and cache-write
+  # counts in its opening `message_start` event, so a stream that dies after
+  # that was still billed for the prompt, and the retry is a second billed
+  # call. Report the usage through :on_llm_token_usage before the delta is
+  # discarded so a host recording usage there sees the attempt. A delta without
+  # usage, such as an OpenAI stream cut before its usage-only final chunk, has
+  # nothing to report and fires nothing.
+  @spec report_usage_of_dropped_delta(t()) :: t()
+  defp report_usage_of_dropped_delta(%LLMChain{delta: %MessageDelta{} = delta} = chain) do
+    fire_usage_callback_and_return(chain, :on_llm_token_usage, [delta])
+  end
+
   # Every path that consumes or rejects a streamed delta clears it from the
   # chain, so a delta present at the start of an LLM call can only be leftover
   # state from a caller re-running a chain after an errored stream, or from a
@@ -1249,8 +1262,13 @@ defmodule LangChain.Chains.LLMChain do
           "LLM stream ended without a terminal delta (delta status: #{inspect(status)})"
         )
 
+        error_chain =
+          updated_chain
+          |> report_usage_of_dropped_delta()
+          |> drop_delta()
+
         handle_delta_error(
-          {:error, drop_delta(updated_chain),
+          {:error, error_chain,
            LangChainError.exception(
              type: "incomplete_stream",
              message: "LLM stream ended without completing the message"
@@ -1312,10 +1330,16 @@ defmodule LangChain.Chains.LLMChain do
 
       {:error, reason} ->
         # Delta conversion failed. Log the error and clear the delta to prevent
-        # it from interfering with subsequent API calls.
+        # it from interfering with subsequent API calls. The provider billed
+        # the full response, so its usage is reported before the delta goes.
         Logger.warning("Error applying delta message. Reason: #{inspect(reason)}")
 
-        {:error, reset_streaming_state(chain),
+        error_chain =
+          chain
+          |> report_usage_of_dropped_delta()
+          |> reset_streaming_state()
+
+        {:error, error_chain,
          LangChainError.exception(
            type: "delta_conversion_failed",
            message: "Error applying delta message: #{inspect(reason)}"

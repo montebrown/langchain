@@ -2985,6 +2985,240 @@ defmodule LangChain.Chains.LLMChainTest do
       refute_received :retries_exceeded_callback
     end
 
+    test "a cut stream's usage fires :on_llm_token_usage before the retry" do
+      # Anthropic reports the whole prompt's input and cache counts in its
+      # `message_start` event, so the attempt is billed even when the stream
+      # dies before a terminal delta. The dropped attempt's usage and the
+      # retry's usage are separate provider calls and both must be recorded,
+      # in the order they were billed.
+      handler = %{
+        on_llm_token_usage: fn %LLMChain{}, %TokenUsage{} = usage ->
+          send(self(), {:usage_callback, usage})
+        end
+      }
+
+      {:ok, cut_opening} =
+        %{role: :assistant, content: nil, status: :incomplete}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 25, output: 1}))
+
+      cut_deltas = [cut_opening, MessageDelta.new!(%{content: "Sock", status: :incomplete})]
+
+      {:ok, good_opening} =
+        %{role: :assistant, content: nil, status: :incomplete}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 40, output: 12}))
+
+      good_deltas = [
+        good_opening,
+        MessageDelta.new!(%{content: "Socktastic!", status: :incomplete}),
+        MessageDelta.new!(%{content: nil, status: :complete})
+      ]
+
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools -> {:ok, cut_deltas} end)
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools -> {:ok, good_deltas} end)
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatAnthropic.new!(%{model: @anthropic_test_model, stream: true}),
+          max_retry_count: 3,
+          callbacks: [handler]
+        })
+        |> LLMChain.add_message(Message.new_user!("Hello"))
+
+      assert {:ok, updated_chain} = LLMChain.run(chain)
+      assert %Message{role: :assistant, status: :complete} = updated_chain.last_message
+
+      # first the dropped attempt, then the completed message, nothing else
+      assert_received {:usage_callback, first_usage}
+      assert_received {:usage_callback, second_usage}
+      refute_received {:usage_callback, _}
+
+      assert %TokenUsage{input: 25, output: 1} = first_usage
+      assert %TokenUsage{input: 40, output: 12} = second_usage
+    end
+
+    test "every exhausted cut-stream attempt fires :on_llm_token_usage" do
+      # Each retry is a separately billed provider call, so the callback fires
+      # once per attempt and the run still ends with the incomplete_stream
+      # error it produces today.
+      handler = %{
+        on_llm_token_usage: fn %LLMChain{}, %TokenUsage{} = usage ->
+          send(self(), {:usage_callback, usage})
+        end
+      }
+
+      {:ok, cut_opening} =
+        %{role: :assistant, content: nil, status: :incomplete}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 25, output: 1}))
+
+      cut_deltas = [cut_opening, MessageDelta.new!(%{content: "Sock", status: :incomplete})]
+
+      # max_retry_count: 3 -> expect exactly 3 LLM calls before exhausting
+      expect(ChatAnthropic, :call, 3, fn _model, _messages, _tools -> {:ok, cut_deltas} end)
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatAnthropic.new!(%{model: @anthropic_test_model, stream: true}),
+          max_retry_count: 3,
+          callbacks: [handler]
+        })
+        |> LLMChain.add_message(Message.new_user!("Hello"))
+
+      assert {:error, error_chain, %LangChainError{type: "incomplete_stream"}} =
+               LLMChain.run(chain)
+
+      assert error_chain.delta == nil
+
+      # :on_llm_token_usage fired once per attempt (3 total)
+      assert_received {:usage_callback, %TokenUsage{input: 25, output: 1}}
+      assert_received {:usage_callback, %TokenUsage{input: 25, output: 1}}
+      assert_received {:usage_callback, %TokenUsage{input: 25, output: 1}}
+      refute_received {:usage_callback, _}
+    end
+
+    test "a cut stream without usage does not fire :on_llm_token_usage" do
+      # An OpenAI stream cut before its usage-only final chunk carries nothing
+      # to report. Only the completed retry fires the callback.
+      handler = %{
+        on_llm_token_usage: fn %LLMChain{}, %TokenUsage{} = usage ->
+          send(self(), {:usage_callback, usage})
+        end
+      }
+
+      cut_deltas = [
+        MessageDelta.new!(%{role: :assistant, content: nil, status: :incomplete}),
+        MessageDelta.new!(%{content: "Sock", status: :incomplete})
+      ]
+
+      {:ok, good_closing} =
+        %{content: nil, status: :complete}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 40, output: 12}))
+
+      good_deltas = [
+        MessageDelta.new!(%{role: :assistant, content: nil, status: :incomplete}),
+        MessageDelta.new!(%{content: "Socktastic!", status: :incomplete}),
+        good_closing
+      ]
+
+      expect(ChatOpenAI, :call, fn _model, _messages, _tools -> {:ok, cut_deltas} end)
+      expect(ChatOpenAI, :call, fn _model, _messages, _tools -> {:ok, good_deltas} end)
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatOpenAI.new!(%{stream: true}),
+          max_retry_count: 3,
+          callbacks: [handler]
+        })
+        |> LLMChain.add_message(Message.new_user!("Hello"))
+
+      assert {:ok, _updated_chain} = LLMChain.run(chain)
+
+      # only the completed message's usage was reported
+      assert_received {:usage_callback, %TokenUsage{input: 40, output: 12}}
+      refute_received {:usage_callback, _}
+    end
+
+    test "a delta that fails conversion fires :on_llm_token_usage before the retry" do
+      # A stream that terminated but whose tool call arguments are malformed is
+      # dropped as delta_conversion_failed. The provider still billed the whole
+      # response, and its usage is on the delta, so it is reported before the
+      # retry the same way an unterminated stream's is.
+      handler = %{
+        on_llm_token_usage: fn %LLMChain{}, %TokenUsage{} = usage ->
+          send(self(), {:usage_callback, usage})
+        end
+      }
+
+      {:ok, bad_opening} =
+        %{role: :assistant, status: :incomplete, index: 0}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 25, output: 9}))
+
+      bad_deltas = [
+        bad_opening,
+        %MessageDelta{
+          status: :incomplete,
+          index: 0,
+          tool_calls: [
+            ToolCall.new!(%{
+              status: :incomplete,
+              type: :function,
+              call_id: "call_bad",
+              name: "search_web",
+              # Truncated JSON
+              arguments: "{\"query\": \"test\",\"",
+              index: 0
+            })
+          ]
+        },
+        %MessageDelta{status: :complete, index: 0}
+      ]
+
+      {:ok, good_opening} =
+        %{role: :assistant, status: :incomplete, index: 0}
+        |> MessageDelta.new()
+        |> TokenUsage.set_wrapped(TokenUsage.new!(%{input: 40, output: 12}))
+
+      good_deltas = [
+        good_opening,
+        %MessageDelta{
+          status: :incomplete,
+          index: 0,
+          tool_calls: [
+            ToolCall.new!(%{
+              status: :incomplete,
+              type: :function,
+              call_id: "call_good",
+              name: "search_web",
+              arguments: "{\"query\": \"test\"}",
+              index: 0
+            })
+          ]
+        },
+        %MessageDelta{status: :complete, index: 0}
+      ]
+
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools -> {:ok, bad_deltas} end)
+      expect(ChatAnthropic, :call, fn _model, _messages, _tools -> {:ok, good_deltas} end)
+
+      search_web =
+        Function.new!(%{
+          name: "search_web",
+          description: "Search the web",
+          parameters_schema: %{
+            type: "object",
+            properties: %{query: %{type: "string"}},
+            required: ["query"]
+          },
+          function: fn _args, _ctx -> {:ok, "results"} end
+        })
+
+      chain =
+        LLMChain.new!(%{
+          llm: ChatAnthropic.new!(%{model: @anthropic_test_model, stream: true}),
+          max_retry_count: 3,
+          callbacks: [handler]
+        })
+        |> LLMChain.add_tools(search_web)
+        |> LLMChain.add_message(Message.new_user!("Search for something"))
+
+      assert {:ok, updated_chain} = LLMChain.run(chain)
+
+      assert %Message{role: :assistant, tool_calls: [%ToolCall{name: "search_web"}]} =
+               updated_chain.last_message
+
+      # first the dropped attempt, then the completed message, nothing else
+      assert_received {:usage_callback, first_usage}
+      assert_received {:usage_callback, second_usage}
+      refute_received {:usage_callback, _}
+
+      assert %TokenUsage{input: 25, output: 9} = first_usage
+      assert %TokenUsage{input: 40, output: 12} = second_usage
+    end
+
     test "leftover delta from a prior call is dropped before a new run" do
       # A chain can arrive at do_run with a delta still attached, from an
       # external caller re-running a chain after an errored stream or from a

@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **`:on_llm_token_usage` fires for a streamed attempt the chain drops before
+  retrying.** When a stream ends without a terminal delta (`"incomplete_stream"`)
+  or its finished delta fails conversion (`"delta_conversion_failed"`), the
+  provider has still billed the call, and Anthropic reports the whole prompt's
+  input, cache-read and cache-write counts in its opening `message_start` event.
+  That usage used to be discarded with the delta, so a host recording usage
+  through the callback never saw up to `max_retry_count` billed attempts per
+  call. It now fires with the dropped delta's `TokenUsage` before the retry,
+  with the same `[chain, usage]` arguments as before, and the retry fires it
+  again when it completes. A host that read the callback as "a message
+  completed" should read it as "a provider call was billed". A dropped attempt
+  whose delta carries no usage, such as an OpenAI stream cut before its
+  usage-only final chunk, fires nothing.
+
 ## v0.13.2
 
 A patch release for reasoning models reached through OpenAI-compatible
