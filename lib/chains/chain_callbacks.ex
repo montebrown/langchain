@@ -69,6 +69,13 @@ defmodule LangChain.Chains.ChainCallbacks do
   Executed when an LLM response reports the token usage in a
   `LangChain.TokenUsage` struct. The data returned depends on the LLM.
 
+  It fires once per billed provider call, not only once per completed
+  message. A streamed attempt that the chain drops before retrying, because
+  the stream ended without a terminal delta or its delta failed conversion,
+  fires it with whatever usage the provider had already reported, and the
+  retry fires it again when it completes. A dropped attempt whose delta
+  carries no usage fires nothing.
+
   The return value is discarded.
   """
   @type llm_token_usage :: (LLMChain.t(), TokenUsage.t() -> any())
