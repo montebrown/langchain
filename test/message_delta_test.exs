@@ -838,6 +838,82 @@ defmodule LangChain.MessageDeltaTest do
              }
     end
 
+    test "keeps text that arrives at a position already holding thinking" do
+      deltas = [
+        %MessageDelta{
+          content: %ContentPart{type: :thinking, content: "Let me "},
+          index: 0,
+          role: :assistant
+        },
+        %MessageDelta{content: %ContentPart{type: :thinking, content: "think."}, index: 0},
+        %MessageDelta{content: "9.9 ", index: 0},
+        %MessageDelta{content: "is larger.", index: 0, status: :complete}
+      ]
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn -> send(self(), MessageDelta.merge_deltas(deltas)) end)
+
+      assert_received %MessageDelta{} = merged
+
+      assert [
+               %ContentPart{type: :thinking, content: "Let me think."},
+               %ContentPart{type: :text, content: "9.9 is larger."}
+             ] = merged.merged_content
+
+      refute log =~ "Cannot merge content parts"
+    end
+
+    test "keeps thinking that arrives at a position already holding text, in arrival order" do
+      merged =
+        MessageDelta.merge_deltas([
+          %MessageDelta{content: ContentPart.text!("Hi "), index: 0, role: :assistant},
+          %MessageDelta{content: ContentPart.thinking!("hmm"), index: 0},
+          %MessageDelta{content: ContentPart.text!("there"), index: 1, status: :complete}
+        ])
+
+      assert [
+               %ContentPart{type: :text, content: "Hi "},
+               %ContentPart{type: :thinking, content: "hmm"},
+               %ContentPart{type: :text, content: "there"}
+             ] = merged.merged_content
+    end
+
+    test "a colliding part merges into the first later part of its type" do
+      primary = %MessageDelta{
+        role: :assistant,
+        merged_content: [
+          ContentPart.thinking!("hmm"),
+          ContentPart.text!("first"),
+          ContentPart.text!("second")
+        ]
+      }
+
+      merged =
+        MessageDelta.merge_delta(primary, %MessageDelta{content: ContentPart.text!("!"), index: 0})
+
+      assert [
+               %ContentPart{type: :thinking, content: "hmm"},
+               %ContentPart{type: :text, content: "first!"},
+               %ContentPart{type: :text, content: "second"}
+             ] = merged.merged_content
+    end
+
+    test "a colliding part prefers a later part of its type over an earlier free position" do
+      primary = %MessageDelta{
+        role: :assistant,
+        merged_content: [ContentPart.thinking!("hmm"), nil, ContentPart.text!("answer")]
+      }
+
+      merged =
+        MessageDelta.merge_delta(primary, %MessageDelta{content: ContentPart.text!("!"), index: 0})
+
+      assert [
+               %ContentPart{type: :thinking, content: "hmm"},
+               nil,
+               %ContentPart{type: :text, content: "answer!"}
+             ] = merged.merged_content
+    end
+
     test "handles merging a thinking part with the signature" do
       merged =
         [
